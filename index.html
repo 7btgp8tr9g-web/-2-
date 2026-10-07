@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="二维码扫描器">
+<link rel="manifest" href="manifest.webmanifest">
+<title>二维码扫描器</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f5f7;color:#111827}
+main{max-width:720px;margin:auto;padding:20px 16px 40px}
+h1{font-size:26px;margin:8px 0 4px}.sub{color:#6b7280;margin:0 0 18px}
+.card{background:#fff;border-radius:18px;padding:16px;margin:12px 0;box-shadow:0 2px 12px #0000000d}
+#reader{width:100%;overflow:hidden;border-radius:14px;background:#111;min-height:260px}
+button{border:0;border-radius:12px;padding:13px 16px;font-size:16px;font-weight:600;background:#111827;color:#fff;margin:5px 4px 5px 0}
+button.secondary{background:#e5e7eb;color:#111827}button.danger{background:#fee2e2;color:#991b1b}
+.stats{display:flex;gap:10px}.stat{flex:1;background:#f3f4f6;border-radius:14px;padding:12px}.num{font-size:28px;font-weight:800}.label{font-size:13px;color:#6b7280}
+.status{padding:12px;border-radius:12px;background:#f3f4f6;margin-top:10px;font-weight:600}.ok{background:#dcfce7;color:#166534}.dup{background:#fef3c7;color:#92400e}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:10px 6px;border-bottom:1px solid #eee;vertical-align:top}th{color:#6b7280}
+.code{word-break:break-all}.small{font-size:12px;color:#6b7280}
+@media(max-width:420px){main{padding:14px 10px}.stats{gap:6px}.stat{padding:10px}.num{font-size:24px}}
+</style>
+</head>
+<body>
+<main>
+<h1>二维码扫描器</h1>
+<p class="sub">二维码内容作为唯一 ID · 自动连续扫描</p>
+
+<div class="card">
+  <div id="reader"></div>
+  <div id="status" class="status">点击“开始扫描”并允许摄像头权限。</div>
+  <div>
+    <button id="start">开始扫描</button>
+    <button id="stop" class="secondary">停止扫描</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="stats">
+    <div class="stat"><div class="num" id="count">0</div><div class="label">唯一二维码数量</div></div>
+    <div class="stat"><div class="num" id="duplicates">0</div><div class="label">重复扫描次数</div></div>
+  </div>
+  <div style="margin-top:10px">
+    <button id="export">导出 CSV</button>
+    <button id="clear" class="danger">清空记录</button>
+  </div>
+</div>
+
+<div class="card">
+<h3 style="margin-top:0">扫描记录</h3>
+<div style="overflow:auto">
+<table><thead><tr><th>#</th><th>二维码内容</th><th>首次扫描</th><th>最近扫描</th><th>重复</th></tr></thead>
+<tbody id="rows"></tbody></table>
+</div>
+<p class="small">数据仅保存在本机浏览器中。</p>
+</div>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+(() => {
+  const KEY="qr_scanner_records_v1";
+  let records = JSON.parse(localStorage.getItem(KEY)||"[]");
+  let duplicateCount = Number(localStorage.getItem(KEY+"_dup")||0);
+  let scanner=null, running=false, locked=false, lastValue="", lastAt=0;
+
+  const $=id=>document.getElementById(id);
+  function save(){localStorage.setItem(KEY,JSON.stringify(records));localStorage.setItem(KEY+"_dup",String(duplicateCount));}
+  function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+  function render(){
+    $("count").textContent=records.length;
+    $("duplicates").textContent=duplicateCount;
+    $("rows").innerHTML=records.slice().reverse().map((r,i)=>`<tr>
+      <td>${records.length-i}</td><td class="code">${esc(r.id)}</td>
+      <td>${esc(r.first)}</td><td>${esc(r.last)}</td><td>${r.duplicates}</td>
+    </tr>`).join("");
+  }
+  function speak(text){
+    if(!("speechSynthesis" in window)) return;
+    speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text);u.lang="zh-CN";u.rate=1;
+    speechSynthesis.speak(u);
+  }
+  function status(text,cls=""){ $("status").className="status "+cls; $("status").textContent=text; }
+  function now(){return new Date().toLocaleString("zh-CN",{hour12:false});}
+
+  function handle(decoded){
+    const id=String(decoded).trim();
+    if(!id || locked) return;
+    // Avoid repeated decoder callbacks while the same QR remains in view.
+    if(id===lastValue && Date.now()-lastAt<1800) return;
+    lastValue=id; lastAt=Date.now(); locked=true;
+    const t=now();
+    const found=records.find(r=>r.id===id);
+    if(found){
+      found.last=t; found.duplicates++;
+      duplicateCount++;
+      save(); render();
+      status("⚠️ 重复扫描："+id,"dup");
+      speak("重复扫描");
+    }else{
+      records.push({id,first:t,last:t,duplicates:0});
+      save(); render();
+      status("✅ 扫描成功："+id,"ok");
+      speak("扫描成功");
+    }
+    // Unlock quickly so the next QR can be scanned without pressing anything.
+    setTimeout(()=>{locked=false;},900);
+  }
+
+  async function start(){
+    if(running) return;
+    if(typeof Html5Qrcode==="undefined"){status("扫描组件加载失败，请检查网络。");return;}
+    scanner = new Html5Qrcode("reader");
+    try{
+      await scanner.start({facingMode:"environment"},{fps:10,qrbox:{width:250,height:250}},handle,()=>{});
+      running=true; status("📷 正在连续扫描……");
+    }catch(e){
+      status("无法打开摄像头。请确认使用 HTTPS，并允许 Safari 使用摄像头。");
+      try{await scanner.clear();}catch(_){}
+      scanner=null;
+    }
+  }
+  async function stop(){
+    if(!scanner||!running) return;
+    try{await scanner.stop();await scanner.clear();}catch(_){}
+    running=false; status("已停止扫描。");
+  }
+  function csv(){
+    const head=["序号","二维码内容","首次扫描","最近扫描","重复扫描次数"];
+    const lines=[head,...records.map((r,i)=>[i+1,r.id,r.first,r.last,r.duplicates])]
+      .map(row=>row.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\r\n");
+    const blob=new Blob(["\ufeff"+lines],{type:"text/csv;charset=utf-8"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="二维码扫描记录.csv";a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }
+  $("start").addEventListener("click",start);
+  $("stop").addEventListener("click",stop);
+  $("export").addEventListener("click",csv);
+  $("clear").addEventListener("click",()=>{
+    if(confirm("确定清空所有扫描记录吗？此操作不可恢复。")){
+      records=[];duplicateCount=0;save();render();status("记录已清空。");
+    }
+  });
+  render();
+})();
+</script>
+</main>
+</body>
+</html>
